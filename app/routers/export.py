@@ -8,7 +8,7 @@ import json
 from app.database import get_db
 from app.models.officer import Officer, OfficerRole
 from app.models.test_record import TestRecord
-from app.routers.test_records import get_current_officer
+from app.dependencies import get_current_officer
 
 router = APIRouter(tags=["Export and Chain"])
 

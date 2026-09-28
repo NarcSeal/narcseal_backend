@@ -19,3 +19,8 @@ class TestRecordSchema(BaseModel):
     station_code: str
     district: str
     state: str
+    test_kit_type: str | None = None
+    sample_id: str | None = None
+    sample_type: str | None = None
+    is_sealed: bool = True
+    notes: str | None = None

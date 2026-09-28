@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import auth, test_records, analytics, officers, records, export, media, kits, ai
+from app.routers import auth, test_records, analytics, officers, records, export, media, kits, ai, admin, regions
 
 app = FastAPI(
     title="NarcSeal API",
@@ -38,6 +38,8 @@ api_v1_router.include_router(export.router)
 api_v1_router.include_router(media.router)
 api_v1_router.include_router(kits.router)
 api_v1_router.include_router(ai.router)
+api_v1_router.include_router(admin.router)
+api_v1_router.include_router(regions.router)
 
 # Include v1 router in the main app
 app.include_router(api_v1_router)

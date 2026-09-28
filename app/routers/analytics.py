@@ -4,18 +4,21 @@ from sqlalchemy import func
 from app.database import get_db
 from app.models.officer import Officer, OfficerRole
 from app.models.test_record import TestRecord
-from app.routers.test_records import get_current_officer
+from app.dependencies import get_current_officer
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 def get_role_based_query(current_officer: Officer, db: Session, *columns):
     query = db.query(*columns) if columns else db.query(TestRecord)
-    if current_officer.role == OfficerRole.FIELD_OFFICER:
+    
+    if current_officer.role == OfficerRole.OFFICER:
         query = query.filter(TestRecord.officer_badge_id == current_officer.badge_id)
-    elif current_officer.role == OfficerRole.STATION_HEAD:
-        query = query.filter(TestRecord.station_code == current_officer.station_code)
-    elif current_officer.role == OfficerRole.DISTRICT_ADMIN:
-        query = query.filter(TestRecord.district == current_officer.district)
+    elif current_officer.role == OfficerRole.REGIONAL_ADMIN:
+        # Join with officer to check region
+        query = query.join(Officer, TestRecord.officer_badge_id == Officer.badge_id)\
+                     .filter(Officer.region_id == current_officer.region_id)
+    elif current_officer.role == OfficerRole.MAIN_ADMIN:
+        pass # Can see everything
     return query
 
 @router.get("/stats")
@@ -33,38 +36,58 @@ def get_stats(current_officer: Officer = Depends(get_current_officer), db: Sessi
     
     # 3. Active officers
     active_officers_query = db.query(Officer).filter(Officer.is_active == True)
-    if current_officer.role == OfficerRole.STATION_HEAD:
-        active_officers_query = active_officers_query.filter(Officer.station_code == current_officer.station_code)
-    elif current_officer.role == OfficerRole.DISTRICT_ADMIN:
-        active_officers_query = active_officers_query.filter(Officer.district == current_officer.district)
-    # Field officers only see themselves
-    elif current_officer.role == OfficerRole.FIELD_OFFICER:
+    if current_officer.role == OfficerRole.REGIONAL_ADMIN:
+        active_officers_query = active_officers_query.filter(Officer.region_id == current_officer.region_id)
+    elif current_officer.role == OfficerRole.OFFICER:
         active_officers_query = active_officers_query.filter(Officer.badge_id == current_officer.badge_id)
         
     active_officers = active_officers_query.count()
     
+    # Calculate yesterday's tests for trend
+    from datetime import timedelta
+    yesterday = today - timedelta(days=1)
+    total_tests_yesterday = get_role_based_query(current_officer, db).filter(func.date(TestRecord.timestamp) == yesterday).count()
+    
+    if total_tests_yesterday > 0:
+        change = ((total_tests_today - total_tests_yesterday) / total_tests_yesterday) * 100
+        tests_change_pct = f"{'+' if change > 0 else ''}{change:.1f}%"
+    else:
+        tests_change_pct = "+0.0%" if total_tests_today == 0 else "+100.0%"
+        
+    # Calculate positivity rate
+    total_tests_overall = get_role_based_query(current_officer, db).count()
+    if total_tests_overall > 0:
+        pos_ratio = (positive_results / total_tests_overall) * 100
+        positive_ratio_pct = f"{pos_ratio:.1f}%"
+    else:
+        positive_ratio_pct = "0.0%"
+
     return {
         "total_tests_today": total_tests_today,
         "positive_results": positive_results,
         "active_officers": active_officers,
-        "pending_syncs": 0, # Since we use immediate sync, this is 0
-        "tests_change_pct": "+5%", # Mock value
-        "positive_ratio_pct": "15%" # Mock value
+        "pending_syncs": 0,
+        "tests_change_pct": tests_change_pct,
+        "positive_ratio_pct": positive_ratio_pct
     }
 
 @router.get("/heatmap")
 def get_heatmap_data(current_officer: Officer = Depends(get_current_officer), db: Session = Depends(get_db)):
     """Returns GPS coordinates of all tests for the heatmap"""
-    query = get_role_based_query(
-        current_officer, 
-        db, 
-        TestRecord.latitude, 
-        TestRecord.longitude, 
-        TestRecord.test_result, 
-        TestRecord.substance
-    )
+    query = get_role_based_query(current_officer, db)
     records = query.all()
-    return [{"lat": r.latitude, "lng": r.longitude, "result": r.test_result, "substance": r.substance} for r in records]
+    return [{
+        "id": r.id,
+        "lat": r.latitude,
+        "lng": r.longitude,
+        "result": r.test_result,
+        "substance": r.substance,
+        "location": r.station_code,
+        "weight_g": 0,
+        "officer": r.officer_badge_id,
+        "timestamp": str(r.timestamp),
+        "confidence": r.confidence
+    } for r in records if r.latitude is not None and r.longitude is not None]
 
 @router.get("/substance-breakdown")
 def get_substance_breakdown(current_officer: Officer = Depends(get_current_officer), db: Session = Depends(get_db)):
@@ -84,18 +107,33 @@ def get_substance_breakdown(current_officer: Officer = Depends(get_current_offic
 @router.get("/daily-tests")
 def get_daily_test_count(current_officer: Officer = Depends(get_current_officer), db: Session = Depends(get_db)):
     """Returns test count per day for the timeline chart"""
-    # Grouping by date (ignoring time)
+    from datetime import datetime, timedelta
     date_func = func.date(TestRecord.timestamp)
-    query = get_role_based_query(
-        current_officer, 
-        db, 
-        date_func.label('date'), 
-        func.count(TestRecord.id).label('count')
-    )
-    results = query.group_by('date').order_by('date').all()
     
-    # Format the date properly for JSON response
-    return [{"date": str(r.date), "count": r.count} for r in results]
+    # Let's get the last 30 days
+    thirty_days_ago = datetime.now().date() - timedelta(days=30)
+    
+    query = get_role_based_query(current_officer, db).filter(date_func >= thirty_days_ago)
+    records = query.all()
+    
+    # Aggregate in Python for simpler logic of positive/negative grouping
+    daily_stats = {}
+    for r in records:
+        d = r.timestamp.date()
+        date_str = d.strftime("%b %d")
+        if date_str not in daily_stats:
+            daily_stats[date_str] = {"date": date_str, "total": 0, "positive": 0, "negative": 0}
+        
+        daily_stats[date_str]["total"] += 1
+        if r.test_result == "POSITIVE":
+            daily_stats[date_str]["positive"] += 1
+        else:
+            daily_stats[date_str]["negative"] += 1
+            
+    # Sort by actual date
+    sorted_stats = sorted(daily_stats.values(), key=lambda x: datetime.strptime(x["date"], "%b %d"))
+    
+    return sorted_stats
 
 @router.get("/alerts")
 def get_trend_alerts(current_officer: Officer = Depends(get_current_officer), db: Session = Depends(get_db)):
@@ -105,8 +143,8 @@ def get_trend_alerts(current_officer: Officer = Depends(get_current_officer), db
     """
     from datetime import datetime, timedelta
     
-    # We only alert NCB Admins or District Admins about trends
-    if current_officer.role not in [OfficerRole.NCB_ADMIN, OfficerRole.DISTRICT_ADMIN]:
+    # We only alert Main Admins or Regional Admins about trends
+    if current_officer.role not in [OfficerRole.MAIN_ADMIN, OfficerRole.REGIONAL_ADMIN]:
         return []
 
     alerts = []

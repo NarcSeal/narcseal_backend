@@ -5,7 +5,7 @@ from typing import Optional
 from app.database import get_db
 from app.models.officer import Officer, OfficerRole
 from app.models.test_record import TestRecord
-from app.routers.test_records import get_current_officer
+from app.dependencies import get_current_officer
 
 router = APIRouter(prefix="/records", tags=["Records"])
 
@@ -23,7 +23,11 @@ def format_record(record: TestRecord):
         "gps_lat": record.latitude,
         "gps_lng": record.longitude,
         "location_name": record.address,
-        "sample_type": "Unknown",
+        "sample_type": record.sample_type or "Unknown",
+        "sample_id": record.sample_id,
+        "test_kit_type": record.test_kit_type,
+        "notes": record.notes,
+        "is_sealed": record.is_sealed,
         "device_id": record.device_id,
         "image_url": f"/uploads/{record.record_id}.jpg", # Serves the actual uploaded image
         "sha256_hash": record.image_hash,
@@ -46,12 +50,13 @@ def get_all_records(
     query = db.query(TestRecord)
     
     # Role-based filtering
-    if current_officer.role == OfficerRole.FIELD_OFFICER:
+    if current_officer.role == OfficerRole.OFFICER:
         query = query.filter(TestRecord.officer_badge_id == current_officer.badge_id)
-    elif current_officer.role == OfficerRole.STATION_HEAD:
-        query = query.filter(TestRecord.station_code == current_officer.station_code)
-    elif current_officer.role == OfficerRole.DISTRICT_ADMIN:
-        query = query.filter(TestRecord.district == current_officer.district)
+    elif current_officer.role == OfficerRole.REGIONAL_ADMIN:
+        query = query.join(Officer, TestRecord.officer_badge_id == Officer.badge_id)\
+                     .filter(Officer.region_id == current_officer.region_id)
+    elif current_officer.role == OfficerRole.MAIN_ADMIN:
+        pass
 
     # Query param filtering
     if result and result != 'ALL':
@@ -82,9 +87,12 @@ def get_record(record_id: str, current_officer: Officer = Depends(get_current_of
         raise HTTPException(status_code=404, detail="Record not found")
         
     # Role check
-    if current_officer.role == OfficerRole.FIELD_OFFICER and record.officer_badge_id != current_officer.badge_id:
+    if current_officer.role == OfficerRole.OFFICER and record.officer_badge_id != current_officer.badge_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    if current_officer.role == OfficerRole.STATION_HEAD and record.station_code != current_officer.station_code:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    if current_officer.role == OfficerRole.REGIONAL_ADMIN:
+        record_officer = db.query(Officer).filter(Officer.badge_id == record.officer_badge_id).first()
+        if not record_officer or record_officer.region_id != current_officer.region_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view records from other regions")
         
     return format_record(record)

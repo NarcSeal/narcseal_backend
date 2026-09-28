@@ -12,14 +12,14 @@ def compute_record_hash(record: TestRecordSchema) -> str:
     
     # Match the dataString concatenation logic from mobile
     data_string = (
-        f"{record.officer_badge_id}"
-        f"{timestamp_str}"
-        f"{record.latitude}"
-        f"{record.longitude}"
-        f"{record.test_result}"
-        f"{record.substance}"
-        f"{record.confidence}"
-        f"{record.image_hash}"
+        f"{record.officer_badge_id}|"
+        f"{timestamp_str}|"
+        f"{record.latitude}|"
+        f"{record.longitude}|"
+        f"{record.test_result}|"
+        f"{record.substance}|"
+        f"{record.confidence}|"
+        f"{record.image_hash}|"
         f"{record.previous_hash}"
     )
     
